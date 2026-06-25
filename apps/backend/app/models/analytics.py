@@ -77,7 +77,6 @@ class Insight(Base):
     insight_type: Mapped[str] = mapped_column(String(50), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), nullable=False)
-    nullable=False)
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
     metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -1,0 +1,27 @@
+{
+  "name": "cognitrack",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:frontend": "pnpm --filter @cognitrack/frontend dev",
+    "dev:backend": "pnpm --filter @cognitrack/backend dev",
+    "build": "pnpm --filter @cognitrack/frontend build && pnpm --filter @cognitrack/backend build",
+    "lint": "pnpm --filter @cognitrack/frontend lint && pnpm --filter @cognitrack/backend lint",
+    "typecheck": "pnpm --filter @cognitrack/frontend typecheck && pnpm --filter @cognitrack/backend typecheck",
+    "test": "pnpm --filter @cognitrack/frontend test && pnpm --filter @cognitrack/backend test",
+    "db:migrate": "pnpm --filter @cognitrack/backend db:migrate",
+    "db:seed": "pnpm --filter @cognitrack/backend db:seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

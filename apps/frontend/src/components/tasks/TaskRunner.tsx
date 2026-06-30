@@ -11,19 +11,30 @@ export interface TaskRunnerRef {
   start: () => void;
 }
 
+interface TrialFeedback {
+  rt: number | null;
+  accuracy: boolean | null;
+  isEarly: boolean;
+  isLate: boolean;
+}
+
 export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, onComplete }, ref) => {
   const [phase, setPhase] = useState<"instructions" | "running" | "complete">("instructions");
   const [currentTrial, setCurrentTrial] = useState(0);
   const [stimulus, setStimulus] = useState<StimulusState>({ type: "waiting", startTime: 0 });
   const [trials, setTrials] = useState<Trial[]>([]);
   const [isPaused, setIsPaused] = useState(false);
+  const [feedback, setFeedback] = useState<TrialFeedback | null>(null);
 
   const trialTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const stimulusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const itiTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const feedbackTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const responseRecordedRef = useRef(false);
   const stimulusStartRef = useRef<number>(0);
   const trialCountRef = useRef(0);
+  const cumulativeRTsRef = useRef<number[]>([]);
+  const cumulativeAccRef = useRef<number[]>([]);
 
   const { lastKey, resetKey } = useKeyboard({ allowedKeys: config.response_keys });
 
@@ -83,11 +94,18 @@ export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, 
       }
 
       const reactionTime = userResponse ? performance.now() - stimulusStartRef.current : null;
+      const isEarly = reactionTime !== null && reactionTime < 150;
+      const isLate = reactionTime === null;
       const isValidRT = reactionTime !== null && reactionTime >= 150 && reactionTime <= 3000;
       const accuracy = userResponse === correctResponse;
-      const finalResponse = isValidRT ? userResponse : null;
+      const finalResponse = isValidRT || isEarly ? userResponse : null;
       const finalAccuracy = isValidRT ? accuracy : null;
       const finalRT = isValidRT ? reactionTime : null;
+
+      if (isValidRT) {
+        cumulativeRTsRef.current.push(reactionTime!);
+        cumulativeAccRef.current.push(accuracy ? 1 : 0);
+      }
 
       const trial: Trial = {
         trial_id: crypto.randomUUID(),
@@ -106,9 +124,17 @@ export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, 
       setTrials((prev) => [...prev, trial]);
       setStimulus({ type: "waiting", startTime: 0 });
 
+      setFeedback({ rt: reactionTime, accuracy: finalAccuracy, isEarly, isLate });
+
+      const feedbackDuration = isEarly ? 1200 : 500;
+
+      feedbackTimeoutRef.current = setTimeout(() => {
+        setFeedback(null);
+      }, feedbackDuration);
+
       itiTimeoutRef.current = setTimeout(() => {
         setCurrentTrial((prev) => prev + 1);
-      }, config.stimulus_timing.inter_trial_interval_ms);
+      }, feedbackDuration + config.stimulus_timing.inter_trial_interval_ms);
     },
     [config]
   );
@@ -126,6 +152,7 @@ export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, 
     if (trialTimeoutRef.current) clearTimeout(trialTimeoutRef.current);
     if (stimulusTimeoutRef.current) clearTimeout(stimulusTimeoutRef.current);
     if (itiTimeoutRef.current) clearTimeout(itiTimeoutRef.current);
+    if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
     setPhase("complete");
     onComplete(trials);
   }, [onComplete, trials]);
@@ -207,14 +234,23 @@ export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, 
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
             <div className="flex -space-x-2" aria-label="Progress">
-              {Array.from({ length: config.trial_count }, (_, i) => (
-                <div
-                  key={i}
-                  className={`w-2 h-2 rounded-full transition-colors ${
-                    i < currentTrial ? "bg-green-500" : i === currentTrial ? "bg-primary-500 animate-pulse" : "bg-neutral-200"
-                  }`}
-                />
-              ))}
+              {Array.from({ length: config.trial_count }, (_, i) => {
+                const t = trials[i];
+                const dotClass = i < currentTrial
+                  ? (t?.accuracy === true ? "bg-green-500"
+                    : t?.accuracy === false ? "bg-red-500"
+                    : t?.reaction_time === null ? "bg-yellow-400"
+                    : "bg-neutral-400")
+                  : i === currentTrial ? "bg-primary-500 animate-pulse"
+                  : "bg-neutral-200";
+                return (
+                  <div
+                    key={i}
+                    className={`w-2 h-2 rounded-full transition-colors ${dotClass}`}
+                    title={t ? `RT: ${t.reaction_time?.toFixed(0) ?? "—"} ms` : undefined}
+                  />
+                );
+              })}
             </div>
             <span className="text-sm text-neutral-500">
               Trial {Math.min(currentTrial + 1, config.trial_count)} / {config.trial_count}
@@ -226,7 +262,12 @@ export const TaskRunner = forwardRef<TaskRunnerRef, TaskRunnerProps>(({ config, 
           </div>
         </div>
 
-        <StimulusDisplay stimulus={stimulus} />
+        <div className="relative">
+          <StimulusDisplay stimulus={stimulus} taskType={config.task_type} />
+          {feedback && (
+            <TrialFeedbackOverlay feedback={feedback} />
+          )}
+        </div>
 
         <div className="mt-8 text-center text-sm text-neutral-500">
           {isPaused ? "Paused — Press ESC to resume" : "Focus on the screen above"}
@@ -251,9 +292,10 @@ interface StimulusState {
 
 interface StimulusDisplayProps {
   stimulus: StimulusState;
+  taskType: string;
 }
 
-function StimulusDisplay({ stimulus }: StimulusDisplayProps) {
+function StimulusDisplay({ stimulus, taskType }: StimulusDisplayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -262,13 +304,18 @@ function StimulusDisplay({ stimulus }: StimulusDisplayProps) {
     }
   }, [stimulus.type]);
 
+  const getBgColor = () => {
+    if (taskType === "simple_reaction") {
+      return stimulus.type === "green_screen" ? "bg-green-500" : "bg-gray-500";
+    }
+    return stimulus.type === "green_screen" ? "bg-green-500" : "bg-neutral-200";
+  };
+
   return (
     <div
       ref={containerRef}
       tabIndex={0}
-      className={`relative w-full aspect-video max-w-2xl mx-auto rounded-xl transition-all duration-200 ${
-        stimulus.type === "green_screen" ? "bg-green-500" : "bg-neutral-200"
-      }`}
+      className={`relative w-full aspect-video max-w-2xl mx-auto rounded-xl transition-colors duration-150 ${getBgColor()}`}
       role="img"
       aria-label={getStimulusAriaLabel(stimulus.type)}
     >
@@ -338,5 +385,44 @@ function BrainIcon({ className }: { className?: string }) {
       <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
       <path d="M9 12a3 3 0 1 0 0 6H6a2 2 0 0 0-2 2v5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-5a2 2 0 0 0-2-2h-3a3 3 0 1 0 0-6Z" />
     </svg>
+  );
+}
+
+function TrialFeedbackOverlay({ feedback }: { feedback: TrialFeedback }) {
+  if (feedback.isEarly) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center animate-in">
+        <div className="bg-white/90 backdrop-blur rounded-xl px-6 py-3 shadow-lg text-center">
+          <p className="text-lg font-bold text-yellow-600">Too Early!</p>
+          <p className="text-sm text-yellow-500">Wait for the stimulus</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (feedback.isLate) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center animate-in">
+        <div className="bg-white/90 backdrop-blur rounded-xl px-6 py-3 shadow-lg text-center">
+          <p className="text-lg font-bold text-red-500">Missed!</p>
+          <p className="text-sm text-red-400">No response detected</p>
+        </div>
+      </div>
+    );
+  }
+
+  const isCorrect = feedback.accuracy === true;
+  const isWrong = feedback.accuracy === false;
+  
+  return (
+    <div className="absolute inset-0 flex items-center justify-center animate-in pointer-events-none">
+      <div className={`rounded-xl px-5 py-2 shadow-lg text-center ${
+        isCorrect ? "bg-green-50/95 backdrop-blur" : isWrong ? "bg-red-50/95 backdrop-blur" : "bg-neutral-50/95 backdrop-blur"
+      }`}>
+        <p className={`text-lg font-bold ${isCorrect ? "text-green-600" : isWrong ? "text-red-500" : "text-neutral-500"}`}>
+          {isCorrect ? "✓" : isWrong ? "✗" : "—"} {feedback.rt?.toFixed(0) ?? "—"} ms
+        </p>
+      </div>
+    </div>
   );
 }
